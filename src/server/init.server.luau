@@ -1,4 +1,6 @@
 --[[
+	Made by: Body_Budi/mack9513 on DC
+	
 	Reactor Relay
 	Single-script Roblox demo authored to showcase broad API knowledge in one readable file.
 
