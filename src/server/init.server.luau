@@ -44,6 +44,7 @@ local CONFIG = table.freeze({
 	RespawnFloorY = -30,
 	LaunchFlightTime = 0.92,
 	ReturnFlightTime = 0.85,
+	LaunchLiftHeight = 3.6,
 	HazardDamage = 30,
 	HazardHitCooldown = 1.15,
 	StableDuration = 22,
@@ -58,10 +59,36 @@ local CONFIG = table.freeze({
 local relayNames = { "North", "East", "South", "West" }
 
 local function create(className, properties, children)
-	local instance = Instance.new(className)
+	local parent = properties and properties.Parent or nil
+	local instance
+	local reusedExisting = false
+
+	-- Reuse authored instances when a map with matching names already exists in Workspace.
+	-- This lets the script bind gameplay logic to pasted geometry instead of duplicating it.
+	if parent and properties and properties.Name then
+		local existing = parent:FindFirstChild(properties.Name)
+		if existing and existing.ClassName == className then
+			instance = existing
+			reusedExisting = true
+		end
+	end
+
+	if not instance then
+		instance = Instance.new(className)
+	end
 
 	for property, value in pairs(properties or {}) do
-		if property ~= "Parent" then
+		local isTransformProperty = property == "Position"
+			or property == "CFrame"
+			or property == "Orientation"
+			or property == "Rotation"
+		local preserveTransformOnReuse = properties and properties.__preserveTransformOnReuse
+
+		if property ~= "Parent" and property ~= "__preserveTransformOnReuse" then
+			if reusedExisting and preserveTransformOnReuse and isTransformProperty then
+				continue
+			end
+
 			instance[property] = value
 		end
 	end
@@ -70,7 +97,7 @@ local function create(className, properties, children)
 		child.Parent = instance
 	end
 
-	instance.Parent = properties and properties.Parent or nil
+	instance.Parent = parent
 	return instance
 end
 
@@ -122,11 +149,6 @@ end
 ensureCollisionGroup(DECOR_GROUP)
 PhysicsService:CollisionGroupSetCollidable(DECOR_GROUP, "Default", false)
 PhysicsService:CollisionGroupSetCollidable(DECOR_GROUP, DECOR_GROUP, false)
-
-local existingWorld = workspace:FindFirstChild(WORLD_NAME)
-if existingWorld then
-	existingWorld:Destroy()
-end
 
 local world = create("Folder", {
 	Name = WORLD_NAME,
@@ -210,6 +232,7 @@ end
 
 local function addLabel(parent, text, studsOffset, color)
 	return create("BillboardGui", {
+		Name = "WorldLabel",
 		Adornee = parent,
 		AlwaysOnTop = true,
 		ExtentsOffsetWorldSpace = studsOffset,
@@ -218,6 +241,7 @@ local function addLabel(parent, text, studsOffset, color)
 		Parent = parent,
 	}, {
 		create("TextLabel", {
+			Name = "LabelText",
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			BackgroundTransparency = 1,
 			Font = Enum.Font.GothamBold,
@@ -233,6 +257,7 @@ end
 
 local function addSurfacePanel(part, face, header, body)
 	local panel = create("SurfaceGui", {
+		Name = "Panel" .. face.Name,
 		Face = face,
 		LightInfluence = 0,
 		SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud,
@@ -242,6 +267,7 @@ local function addSurfacePanel(part, face, header, body)
 	})
 
 	create("Frame", {
+		Name = "PanelFrame",
 		BackgroundColor3 = Color3.fromRGB(16, 19, 28),
 		BackgroundTransparency = 0.15,
 		BorderSizePixel = 0,
@@ -249,14 +275,17 @@ local function addSurfacePanel(part, face, header, body)
 		Parent = panel,
 	}, {
 		create("UICorner", {
+			Name = "PanelCorner",
 			CornerRadius = UDim.new(0, 24),
 		}),
 		create("UIStroke", {
+			Name = "PanelStroke",
 			Color = Color3.fromRGB(96, 205, 255),
 			Transparency = 0.2,
 			Thickness = 4,
 		}),
 		create("TextLabel", {
+			Name = "Header",
 			BackgroundTransparency = 1,
 			Font = Enum.Font.GothamBlack,
 			Position = UDim2.fromScale(0.06, 0.08),
@@ -267,6 +296,7 @@ local function addSurfacePanel(part, face, header, body)
 			TextXAlignment = Enum.TextXAlignment.Left,
 		}),
 		create("TextLabel", {
+			Name = "Body",
 			BackgroundTransparency = 1,
 			Font = Enum.Font.GothamMedium,
 			Position = UDim2.fromScale(0.06, 0.3),
@@ -370,6 +400,7 @@ local hubTrim = create("Part", {
 
 local instructionWall = create("Part", {
 	Name = "InstructionWall",
+	__preserveTransformOnReuse = true,
 	Anchored = true,
 	CanCollide = true,
 	Color = Color3.fromRGB(12, 16, 24),
@@ -390,7 +421,7 @@ addSurfacePanel(
 	instructionWall,
 	Enum.NormalId.Front,
 	"Demo Notes",
-	"This arena is generated entirely by one server script. It demonstrates CFrame motion, physics launches, prompts, overlap-based hazards, metatable controllers, attributes, and runtime world construction."
+	"This demo is driven by one server script. It demonstrates CFrame motion, physics launches, prompts, overlap-based hazards, metatable controllers, attributes, and gameplay state management."
 )
 
 local coreRing = create("Part", {
@@ -445,12 +476,15 @@ local reactorCore = create("Part", {
 	Parent = geometryFolder,
 }, {
 	create("PointLight", {
+		Name = "CoreLight",
 		Brightness = 3.5,
 		Color = Color3.fromRGB(96, 205, 255),
 		Range = 28,
 		Shadows = false,
 	}),
 })
+
+local reactorCoreLight = reactorCore:FindFirstChild("CoreLight") or reactorCore:FindFirstChildOfClass("PointLight")
 
 local relayFolder = create("Folder", {
 	Name = "Relays",
@@ -498,11 +532,12 @@ local RelayNode = {}
 RelayNode.__index = RelayNode
 
 function RelayNode.new(index, name, angle)
-	local direction = Vector3.new(math.cos(angle), 0, math.sin(angle))
-	local stationPosition = direction * CONFIG.StationRadius + Vector3.new(0, CONFIG.StationHeight, 0)
+	local fallbackDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
+	local fallbackStationPosition = fallbackDirection * CONFIG.StationRadius + Vector3.new(0, CONFIG.StationHeight, 0)
 
 	local platform = create("Part", {
 		Name = name .. "Platform",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = true,
 		Color = Color3.fromRGB(34, 44, 60),
@@ -510,12 +545,17 @@ function RelayNode.new(index, name, angle)
 		Shape = Enum.PartType.Cylinder,
 		Size = Vector3.new(4, 28, 28),
 		Orientation = Vector3.new(0, 0, 90),
-		Position = stationPosition,
+		Position = fallbackStationPosition,
 		Parent = relayFolder,
 	})
 
+	local stationPosition = platform.Position
+	local radialOffset = Vector3.new(stationPosition.X, 0, stationPosition.Z)
+	local direction = radialOffset.Magnitude > 0 and radialOffset.Unit or fallbackDirection
+
 	local trim = create("Part", {
 		Name = name .. "Trim",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = false,
 		Color = checkpointColor,
@@ -529,6 +569,7 @@ function RelayNode.new(index, name, angle)
 
 	local checkpoint = create("Part", {
 		Name = name .. "Checkpoint",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = false,
 		Color = checkpointColor,
@@ -540,6 +581,7 @@ function RelayNode.new(index, name, angle)
 
 	local pedestal = create("Part", {
 		Name = name .. "Pedestal",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = true,
 		Color = Color3.fromRGB(22, 28, 40),
@@ -551,6 +593,7 @@ function RelayNode.new(index, name, angle)
 
 	local orb = create("Part", {
 		Name = name .. "RelayOrb",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = false,
 		Color = inactiveRelayColor,
@@ -561,6 +604,7 @@ function RelayNode.new(index, name, angle)
 		Parent = relayFolder,
 	}, {
 		create("PointLight", {
+			Name = "RelayLight",
 			Brightness = 2.2,
 			Color = inactiveRelayColor,
 			Range = 18,
@@ -569,16 +613,20 @@ function RelayNode.new(index, name, angle)
 	})
 
 	local prompt = create("ProximityPrompt", {
+		Name = "StabilizerPrompt",
 		ActionText = "Stabilize Relay",
+		Enabled = true,
 		RequiresLineOfSight = false,
 		HoldDuration = 1.2,
 		MaxActivationDistance = 12,
 		ObjectText = name .. " Relay",
 		Parent = orb,
 	})
+	prompt:SetAttribute("RelayName", name)
 
 	local returnPad = create("Part", {
 		Name = name .. "ReturnPad",
+		__preserveTransformOnReuse = true,
 		Anchored = true,
 		CanCollide = false,
 		Color = Color3.fromRGB(255, 205, 76),
@@ -760,9 +808,16 @@ local function bindLaunchPad(part, targetPosition, flightTime)
 		state.LastLaunchTick = now
 		touchDebounce[player] = now
 
-		local launchVelocity = computeBallisticVelocity(root.Position, targetPosition, flightTime)
+		local launchOrigin = part.Position + Vector3.new(0, CONFIG.LaunchLiftHeight, 0)
+		local launchTarget = targetPosition + Vector3.new(0, 2.5, 0)
+
+		-- Snap the character to a known launch origin so the arc is consistent even if the
+		-- player hits the pad off-center, while jumping, or while already carrying velocity.
+		character:PivotTo(CFrame.new(launchOrigin, launchOrigin + part.CFrame.LookVector))
+		root.AssemblyAngularVelocity = Vector3.zero
+
+		local launchVelocity = computeBallisticVelocity(launchOrigin, launchTarget, flightTime)
 		root.AssemblyLinearVelocity = launchVelocity
-		root:ApplyImpulse(Y_AXIS * root.AssemblyMass * 3)
 		makeFlash(part.Position + Vector3.new(0, 1.5, 0), part.Color)
 	end)
 end
@@ -939,21 +994,30 @@ function Drone.new(index, radius, height, angularSpeed, phase)
 		Parent = model,
 	})
 
-	local wingRight = wingLeft:Clone()
-	wingRight.Name = "WingRight"
-	wingRight.Parent = model
+	local wingRight = create("Part", {
+		Name = "WingRight",
+		Anchored = true,
+		CanCollide = false,
+		Color = Color3.fromRGB(40, 48, 62),
+		Material = Enum.Material.Metal,
+		Size = Vector3.new(6, 0.4, 1.4),
+		Parent = model,
+	})
 
 	local attachment0 = create("Attachment", {
+		Name = "TrailLeft",
 		Position = Vector3.new(-1.4, 0, 0),
 		Parent = body,
 	})
 
 	local attachment1 = create("Attachment", {
+		Name = "TrailRight",
 		Position = Vector3.new(1.4, 0, 0),
 		Parent = body,
 	})
 
 	create("Trail", {
+		Name = "EngineTrail",
 		Attachment0 = attachment0,
 		Attachment1 = attachment1,
 		Color = ColorSequence.new(Color3.fromRGB(96, 205, 255), Color3.fromRGB(255, 255, 255)),
@@ -1031,8 +1095,10 @@ local function enterStableWindow()
 	gameState.StableEndsAt = os.clock() + CONFIG.StableDuration
 
 	reactorCore.Color = Color3.fromRGB(120, 255, 200)
-	reactorCore.PointLight.Color = reactorCore.Color
-	reactorCore.PointLight.Brightness = 4.4
+	if reactorCoreLight then
+		reactorCoreLight.Color = reactorCore.Color
+		reactorCoreLight.Brightness = 4.4
+	end
 
 	for _, beam in ipairs(hazardBeams) do
 		beam:setStable(true)
@@ -1056,8 +1122,10 @@ local function enterStableWindow()
 
 		gameState.IsStable = false
 		reactorCore.Color = Color3.fromRGB(96, 205, 255)
-		reactorCore.PointLight.Color = reactorCore.Color
-		reactorCore.PointLight.Brightness = 3.5
+		if reactorCoreLight then
+			reactorCoreLight.Color = reactorCore.Color
+			reactorCoreLight.Brightness = 3.5
+		end
 
 		for _, beam in ipairs(hazardBeams) do
 			beam:setStable(false)
@@ -1069,24 +1137,35 @@ local function enterStableWindow()
 	end)
 end
 
+local function tryActivateRelay(player, relayNode)
+	if not player or not relayNode or relayNode.Active then
+		return
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	local state = getPlayerState(player)
+
+	relayNode:setActive(true)
+	gameState.ActiveNodeCount += 1
+
+	updateCheckpoint(player, relayNode.Name, relayNode.Platform.CFrame + Vector3.new(0, 6, 0))
+	awardScore(player, CONFIG.NodeScore)
+	awardStat(player, "Nodes", 1)
+	state.NextSurvivalTick = os.clock() + CONFIG.SurvivalTickSeconds
+
+	if gameState.ActiveNodeCount >= #relayNodes then
+		enterStableWindow()
+	end
+end
+
 for _, relayNode in ipairs(relayNodes) do
 	scriptJanitor:add(relayNode.Prompt.Triggered:Connect(function(player)
-		local state = getPlayerState(player)
-		if relayNode.Active then
-			return
-		end
-
-		relayNode:setActive(true)
-		gameState.ActiveNodeCount += 1
-
-		updateCheckpoint(player, relayNode.Name, relayNode.Platform.CFrame + Vector3.new(0, 6, 0))
-		awardScore(player, CONFIG.NodeScore)
-		awardStat(player, "Nodes", 1)
-		state.NextSurvivalTick = os.clock() + CONFIG.SurvivalTickSeconds
-
-		if gameState.ActiveNodeCount >= #relayNodes then
-			enterStableWindow()
-		end
+		tryActivateRelay(player, relayNode)
 	end))
 end
 
@@ -1117,35 +1196,32 @@ scriptJanitor:add(coreRewardPad.Touched:Connect(function(hit)
 	makeFlash(coreRewardPad.Position + Vector3.new(0, 1.5, 0), coreRewardPad.Color)
 end))
 
+local function getOrCreateIntValue(parent, name)
+	local existing = parent:FindFirstChild(name)
+	if existing and existing:IsA("IntValue") then
+		return existing
+	end
+
+	return create("IntValue", {
+		Name = name,
+		Value = 0,
+		Parent = parent,
+	})
+end
+
 local function createLeaderstats(player)
-	local leaderstats = create("Folder", {
-		Name = "leaderstats",
-		Parent = player,
-	})
+	local leaderstats = player:FindFirstChild("leaderstats")
+	if not leaderstats then
+		leaderstats = create("Folder", {
+			Name = "leaderstats",
+			Parent = player,
+		})
+	end
 
-	create("IntValue", {
-		Name = "Score",
-		Value = 0,
-		Parent = leaderstats,
-	})
-
-	create("IntValue", {
-		Name = "Nodes",
-		Value = 0,
-		Parent = leaderstats,
-	})
-
-	create("IntValue", {
-		Name = "Stabilizations",
-		Value = 0,
-		Parent = leaderstats,
-	})
-
-	create("IntValue", {
-		Name = "CoreClaims",
-		Value = 0,
-		Parent = leaderstats,
-	})
+	getOrCreateIntValue(leaderstats, "Score")
+	getOrCreateIntValue(leaderstats, "Nodes")
+	getOrCreateIntValue(leaderstats, "Stabilizations")
+	getOrCreateIntValue(leaderstats, "CoreClaims")
 end
 
 local function respawnPlayer(player)
@@ -1170,6 +1246,7 @@ local function onCharacterAdded(player, character)
 
 	humanoid.UseJumpPower = false
 	humanoid.JumpHeight = 8
+	humanoid.WalkSpeed = 50
 
 	task.defer(function()
 		if character.Parent then
@@ -1177,15 +1254,8 @@ local function onCharacterAdded(player, character)
 		end
 	end)
 
-	scriptJanitor:add(humanoid.Died:Connect(function()
-		task.delay(1.25, function()
-			if player.Parent then
-				respawnPlayer(player)
-			end
-		end)
-	end))
-
 	create("Highlight", {
+		Name = "PlayerHighlight",
 		Adornee = character,
 		DepthMode = Enum.HighlightDepthMode.Occluded,
 		Enabled = true,
